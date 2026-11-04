@@ -90,6 +90,9 @@ func (d *Downloader) resolveHuangdouPlayback(ctx context.Context, client *huangd
 	}
 	data := huangdouDataMap(decoded)
 	media := firstNonEmpty(mapString(data, "m3u8"), mapString(data, "url"), mapString(data, "play_url"), mapString(data, "playUrl"))
+	if preferred := d.huangdouPreferredLine(ctx, data, client.host+"/home"); preferred != "" {
+		media = preferred
+	}
 	if huangdouPreviewOnly(data, media, client.host) {
 		return providerMedia{}, &huangdouAPIError{code: "preview", message: "黄豆仅提供试看，未取得该集正片；不会把试看内容当作完整分集"}
 	}
@@ -173,6 +176,31 @@ func isHuangdouAccessError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// huangdouPreferredLine 优先选择非 CloudFront 的播放线路。
+// 黄豆同时下发 free / line2（AWS CloudFront）与 line3（国内 CDN，如 newbofang02.hzlld56.com）；
+// 国内网络访问 CloudFront 常不可用或极慢，而各线路的分片与 AES key 完全相同，
+// 因此优先返回可用的国内线路，全部不可用时返回空串交给调用方沿用默认地址。
+func (d *Downloader) huangdouPreferredLine(ctx context.Context, data map[string]any, referer string) string {
+	for _, row := range huangdouList(data["lines"]) {
+		link := firstNonEmpty(mapString(row, "url"), mapString(row, "m3u8"), mapString(row, "play_url"))
+		if link == "" || !isProviderHTTPMediaURL(link) {
+			continue
+		}
+		parsed, err := url.Parse(link)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(parsed.Hostname()), "cloudfront.net") {
+			continue
+		}
+		body, err := d.fetchProviderText(ctx, link, referer)
+		if err == nil && strings.HasPrefix(strings.TrimSpace(body), "#EXTM3U") {
+			return link
+		}
+	}
+	return ""
 }
 
 func huangdouPreviewOnly(data map[string]any, media, host string) bool {
